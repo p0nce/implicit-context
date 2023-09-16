@@ -31,6 +31,7 @@ Example:
 
         assert(context.userStuff == 4); // follows chain of contexts
         context.userStuff == 3;
+        assert(context.userStuff == 3); // stack-like organization of contexts
 
         popContext();
 
@@ -74,8 +75,21 @@ unittest
 struct ImplicitContext // shouldn't be named normally
 {
 public:
-nothrow @nogc @safe:
+pure nothrow @nogc @safe:
 
+
+    /// Get a context variable.
+    auto opDispatch(string name)()
+    {
+        U res;        
+        return res;
+    }
+
+    /// Set (and create) a context variable.
+    auto opDispatch(string name, Arg)(Arg arg)
+    {
+        // TODO
+    }
 
 private:
 
@@ -85,12 +99,6 @@ private:
     /// Offset of the context position in the context stack.
     /// This way on realloc we don't have to update the offsets of existing contexts.
     size_t offset;
-
-    /// Push bytes on the stack.
-    void pushBytes(const(ubyte)* bytes, size_t size)
-    {
-
-    }
 }
 
 /// Return current context object.
@@ -103,7 +111,7 @@ ImplicitContext context()
 
 /// Saves context on the thread-local context stack. The current `context()` becomes a copy of that.
 /// Needs to be paired with `pop`.
-/// Returns: the new top context.
+/// Returns: the new top context, so that you can set a context value immediately.
 ImplicitContext pushContext()
 {
     return g_contextStack.pushContext();
@@ -131,31 +139,81 @@ struct ContextStack
 nothrow @nogc @safe:
 public:
 
-    ImplicitContext currentContext()
+    ImplicitContext currentContext() return
     {
         // TODO: must create a first entry if none yet.
-
-        return ImplicitContext(this, 
-
-
+        return ImplicitContext(&this, offsetOfTopContext);
     }
 
-    ImplicitContext pushContext()
+    ImplicitContext pushContext() return
     {
+        // push offset of start of parent context
+        pushBytes(cast(ubyte*) &offsetOfTopContext, size_t.sizeof);
 
+        // Point to new context.
+        offsetOfTopContext = size;
+        
+        return currentContext();
+    }
 
+    void popContext() @trusted
+    {
+        // Retrieve parent context location.
+
+        const(ubyte)* p = cast(const(ubyte)*) &buffer[offsetOfTopContext - size_t.sizeof];
+        size_t parentOffset;
+        ubyte* bytes = cast(ubyte*) parentOffset;        
+        bytes[0..size_t.sizeof] = p[0..size_t.sizeof];
+
+        // Drop former context content.
+        size = offsetOfTopContext;
+
+        // Point to parent context now.
+        offsetOfTopContext = parentOffset;
     }
 
 
 private:
+
     void* buffer = null; // A single buffer.
+    
+    // Offset of the start of the current context, in the stack.
+    // Stack grows to positie addresses.
     size_t offsetOfTopContext = 0;
-    size_t size;
+    
+    // Number bytes in the complete stack.
+    size_t size = 0;
+    
+    // Number of bytes in the allocated buffer.
+    size_t capacity = 0;
+
+    /// Push bytes on stack, extend memory if needed.
+    void pushBytes(scope const(ubyte)* bytes, size_t sz) @trusted
+    {
+        if (capacity < size + sz)
+        {
+            buffer = safe_realloc(buffer, size + sz); // PERF: optimize upsize realloc
+            capacity = size + sz;
+        }
+
+        ubyte* p = cast(ubyte*) &buffer[size];
+        p[0..sz] = bytes[0..sz];
+        size += sz;
+    }
+
+    // Pop bytes from stack.
+    void popBytes(ubyte* bytes, size_t sz) @trusted
+    {
+        ubyte* p = cast(ubyte*) &buffer[size-sz];
+        bytes[0..sz] = p[0..sz];
+        size -= sz;
+
+        // TODO: realloc in case we can win a sizeable amount of memory.
+    }
 }
  
 
-
-void* safe_realloc(void* ptr, size_t newSize)
+void* safe_realloc(void* ptr, size_t newSize) @trusted
 {
     if (newSize == 0)
     {
@@ -164,3 +222,26 @@ void* safe_realloc(void* ptr, size_t newSize)
     }
     return realloc(ptr, newSize);
 }
+
+
+/** 
+
+    APPENDIX: ABI of context stack.
+
+    Let SZ = size_t.sizeof;
+
+
+     -SZ offset of parent context.
+    0000 number of entries in the context "numEntries"
+    0004 bloom filter of identifier hashes
+    
+    foreach(entry; 0..numEntries x times):
+        
+        0000        size in bytes, including identifier and this header.
+        0004        size of identifier in bytes
+        0008        identifier (utf-8 encoding).
+        0008+len    size of value in bytes
+        0008+len+4  context value
+
+*/
+    
