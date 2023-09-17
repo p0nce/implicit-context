@@ -19,11 +19,15 @@ Examples:
 
 Note: internal stack is handled with malloc/realloc/free from the C stdlib.
 
+Important difference:
+    `pushContext()` and `popContext()` are explicit here.
+    Leaving a scope {} doesn't restore parent context. 
+
 
 Example:
 
      // writeln(context.userStuff); // runtime crash
-     context.userStuff = 4;
+     context.set!int("userStuff", 4);
      assert(context.userStuff == 4);
 
      void subProc()
@@ -50,7 +54,7 @@ import core.stdc.stdlib : malloc, free, realloc;
 nothrow @nogc @safe:
 
 // Usage: a bit like Odin.
-void test() @trusted
+unittest 
 {
     void supertramp()
     {
@@ -63,7 +67,12 @@ void test() @trusted
 
     auto c = context; // copy the current scope's context
 
+    context.user_index = 122;
+    assert(context.get!int("user_index") == 122);
+
     context.set!int("user_index", 456);
+    assert(context.get!int("user_index") == 456);
+
     assert(context.get!int("user_index") == 456);
 
     {
@@ -94,6 +103,17 @@ nothrow @nogc @safe:
 
     /// Maximum variable size accepted as type.    
     enum uint maxVariableSize = uint.max;
+
+    void opDispatch(string name, Arg)(Arg value)
+    {
+        set!Arg(name, value);
+    }
+
+    auto opDispatch(string name, Arg)() @property
+    {
+        return get!Arg(name);
+    }
+
 
     /// Get a context variable. The look-up will chain to above contexts like sort of namespaces 
     /// or a dynamic cast. Topmost context gets the lookup.
