@@ -56,7 +56,6 @@ void test() @trusted
     {
         // this `context` is the same as the parent procedure that it was called from
         assert(context.get!int("user_index") == 123);
-        dumpStack(context.stack);
 
         // From this example, context.user_index == 123
         // A context.allocator is assigned to the return value of `my_custom_allocator()`
@@ -71,10 +70,11 @@ void test() @trusted
         pushContext();
 
         context.set!(void*)("allocator", null);
+        pushContext();
         context.set!int("user_index", 123);
         supertramp(); // the `context` for this scope is implicitly passed to `supertramp`, as it's in a TLS stack.
-
         assert(context.get!int("user_index") == 123);
+        popContext();
         popContext();
     }
 
@@ -148,15 +148,13 @@ nothrow @nogc @safe:
         {
             // modify in place
             if (varSize != T.sizeof)
-                assert(false); // bad size, programming error            
+                assert(false); // bad size, programming error
             foreach(n; 0..T.sizeof)
                 existing[n] = pvalue[n];
         }
         else
         {
             import core.stdc.stdio;
-            //printf("push identlen = %d\n", cast(int)name.length);
-            //printf("push valuelen = %d\n", cast(int)T.sizeof);
 
             stack.pushValue!uint(cast(uint)name.length); // TODO: in ABI, put size_t here
             stack.pushValue!uint(cast(uint)T.sizeof);
@@ -189,7 +187,6 @@ private:
 
         // PERF: skip the whole context traversal based upon a bloom hash of identifiers there.
 
-       // printf("entries = %d\n", entries);
         size_t varHeader = contextOffset + 8 + size_t.sizeof; // skip frame header
         for (uint n = 0; n < entries; ++n)
         {
@@ -197,11 +194,7 @@ private:
             stack.readValue(varHeader, identSize);
             stack.readValue(varHeader+4, valueSize);
 
-            import core.stdc.stdio;
-            //printf("identlen = %d\n", identSize);
-            //printf("valuelen = %d\n", valueSize);
-
-            const(char)[] storedIndent = cast(const(char)[]) stack.bufferSlice(varHeader+8, identSize);
+            const(char)[] storedIndent = cast(const(char)[]) stack.bufferSlice(varHeader + 8, identSize);
             if (storedIndent == name)
             {
                 varSize = valueSize;
@@ -285,7 +278,6 @@ public:
         if (contextCount == 0)
             createFirstContext();
 
-        // TODO: must create a first entry if none yet.
         return ImplicitContext(&this, offsetOfTopContext);
     }
 
@@ -457,11 +449,12 @@ debug(debugContext)
             uint bloom;
             stack.readValue(ofs, parentContextOfs);
             stack.readValue(ofs + size_t.sizeof, entries);
-            stack.readValue(ofs + parentContextOfs+size_t.sizeof+4, bloom);
+            stack.readValue(ofs + size_t.sizeof+4, bloom);
+            assert(bloom == 0);
 
             printf(" - parent  = %zu\n", parentContextOfs);
             printf(" - entries = %d\n", cast(int)entries);
-            printf(" - bloom   = %d\n", cast(int)bloom);
+            printf(" - bloom   = %x\n", bloom);
 
             ofs += size_t.sizeof + 8;
             for (uint n = 0; n < entries; ++n)
@@ -471,17 +464,17 @@ debug(debugContext)
                 stack.readValue(ofs, identLen);
                 stack.readValue(ofs+4, varLen);
 
-                printf(" - Var %d has identifier of len %d and content of length %d:\n", n, identLen, varLen);
+                printf(" - context variable %d:\n", n);
 
                 const(ubyte)[] ident = stack.bufferSlice(ofs+8, identLen);
                 const(ubyte)[] data = stack.bufferSlice(ofs+8+identLen, varLen);
-                printf(`    * identifier = "%.*s"` ~ " (%zu bytes)\n", ident.length, ident.ptr, ident.length);
+                printf(`    * identifier = "%.*s"` ~ " (%zu bytes)\n", cast(int)(ident.length), ident.ptr, ident.length);
                 printf(`    * content    = `);
                 for (size_t b = 0; b < data.length; ++b)
                 {
                     printf("%02X ", data[b]);
                 }
-                printf(" (%zu bytes)\n", varLen);
+                printf(" (%d bytes)\n", varLen);
                 ofs += 8 + identLen + varLen;
                 sizeOfContext += 8 + identLen + varLen;
             }
@@ -504,8 +497,8 @@ debug(debugContext)
     Let SZ = size_t.sizeof;
 
 
-    0000 offset of parent context in the stack (root context is at location SZ, null context at location 0)
-    00SZ number of entries in the context "numEntries"
+    0000   offset of parent context in the stack (root context is at location SZ, null context at location 0)
+    00SZ   number of entries in the context "numEntries"
     00SZ+4 bloom filter of identifier hashes (unused yet)
     
     foreach(entry; 0..numEntries x times):
