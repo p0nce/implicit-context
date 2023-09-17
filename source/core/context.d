@@ -61,14 +61,12 @@ unittest
         // this `context` is the same as the parent procedure that it was called from
         assert(context.get!int("user_index") == 123);
 
-        // From this example, context.user_index == 123
-        // A context.allocator is assigned to the return value of `my_custom_allocator()`
+        auto ctx = scopedContext(); // save/restore context at end of scope
+        ctx.set!int("user_index", 64); // could use that one, or just `context`.
     }
 
     auto c = context; // copy the current scope's context
 
-    context.user_index = 122;
-    assert(context.get!int("user_index") == 122);
 
     context.set!int("user_index", 456);
     assert(context.get!int("user_index") == 456);
@@ -103,17 +101,6 @@ nothrow @nogc @safe:
 
     /// Maximum variable size accepted as type.    
     enum uint maxVariableSize = uint.max;
-
-    void opDispatch(string name, Arg)(Arg value)
-    {
-        set!Arg(name, value);
-    }
-
-    auto opDispatch(string name, Arg)() @property
-    {
-        return get!Arg(name);
-    }
-
 
     /// Get a context variable. The look-up will chain to above contexts like sort of namespaces 
     /// or a dynamic cast. Topmost context gets the lookup.
@@ -254,12 +241,40 @@ private:
 
 
 
+
 /// Return current context object.
 /// An `ImplicitContext` is safely copyable, but only the top-most context per-thread can be 
 /// modified (like in _the_ stack).
 ImplicitContext context()
 {
     return g_contextStack.currentContext();
+}
+
+// Same as ImplicitContext, but RAII.
+struct ScopedContext
+{
+public:
+nothrow @nogc @safe:
+
+    ~this()
+    {
+        popContext();
+    }
+
+    alias ctx this;
+
+
+    @disable this(this);
+
+    ImplicitContext ctx;
+}
+
+ScopedContext scopedContext()
+{
+    pushContext();
+    ScopedContext r;
+    r.ctx = context();
+    return r;
 }
 
 /// Saves context on the thread-local context stack. The current `context()` becomes a copy of that.
@@ -462,7 +477,7 @@ debug(debugContext)
         size_t ofs = ContextStack.offsetOfRootContext;
         while(true)
         {
-            printf("*** Context at %llu\n", ofs);
+            printf("*** Context at %zu\n", ofs);
             size_t sizeOfContext = size_t.sizeof + 8; // todo delete sizeOfContext
             size_t parentContextOfs;
             uint entries;
