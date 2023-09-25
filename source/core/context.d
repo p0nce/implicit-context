@@ -3,12 +3,14 @@
 This is an implicit context system like in Odin, itself probably inspired by Scala implicits.
 In other words, a system to have scoped globals.
 
-"In each scope, there is an implicit value named context. This context variable is local to each 
+"In each scope, there is an implicit value named context. This CONTEXT VARIABLE is local to each 
 scope and is implicitly passed by pointer to any procedure call in that scope (if the procedure 
 has the Odin calling convention)."
 
 Without language support, we don't have the ABI and the scope-specific context, however with TLS 
 and manual scopes we can emulate that to pass parameters in an implicit way (scoped globals, in a way).
+
+Note: this module uses TLS.
 
 Examples:
   - allocators
@@ -26,7 +28,6 @@ Important difference:
 
 Example:
 
-     // writeln(context.userStuff); // runtime crash
      context.set!int("userStuff", 4);
      assert(context.get!int("userStuff") == 4);
 
@@ -34,27 +35,30 @@ Example:
      {
         pushContext();
 
-        assert(context.userStuff == 4); // follows chain of contexts
-        context.userStuff == 3;
-        assert(context.userStuff == 3); // stack-like organization of contexts
+        assert(context.get!int("userStuff") == 4);            // follows chain of contexts
 
-        popContext();
+        context.set!int("userStuff", 3);
+        assert(context.get!int("userStuff") == 3);            // stack-like organization of contexts
 
-        assert(context.userStuff == 4); // stack-like organization of contexts
+        void* buffer = context.alloca(128);                   // Support stack allocation.
+
+        popContext();                                         // buffer reclaimed here
+
+        assert(context.get!int("userStuff") == 4);            // stack-like organization of contexts, with hierarchic namespacing
      }
     subProc();
 
 */
-// TODO: error system that propagates on popContext?
+// TODO: error system that propagates on popContext? so as to replace exceptions.
 // TODO: what to do for lifetime stuff. A function to be called on release? See also: COM.
-// TODO: what to do for GC roots? context should be scanned somehow.
+// TODO: what to do for GC roots? context might be scanned somehow.
 module core.context;
 
 import core.stdc.stdlib : malloc, free, realloc;
 
 nothrow @nogc @safe:
 
-// Usage: a bit like Odin.
+// Usage: see that unittest.
 unittest 
 {
     void supertramp()
@@ -67,18 +71,27 @@ unittest
     }
 
     context.set!int("user_index", 456);
+    
+    // Allocate on TLS stack.
+    () @trusted
+    {
+        ubyte* storage = cast(ubyte*) context.alloca(128);
+        storage[0..128] = 2;
+    }();
+
 
     assert(context.get!int("user_index") == 456);
 
     {
-        pushContext();
-
         context.set!(void*)("allocator", null);
         pushContext();
-        context.set!int("user_index", 123);
-        supertramp(); // the `context` for this scope is implicitly passed to `supertramp`, as it's in a TLS stack.
-        assert(context.get!int("user_index") == 123);
-        popContext();
+            context.set!int("user_index", 123);
+
+            // The `context` for this scope is implicitly passed to `supertramp`, as it's in a TLS stack, there is no ABI change or anything to do.
+            // but you don't get implicit context push/pop.
+            supertramp(); 
+
+            assert(context.get!int("user_index") == 123);
         popContext();
     }
 
@@ -92,10 +105,6 @@ struct ImplicitContext // shouldn't be named normally
 {
 public:
 nothrow @nogc @safe:
-
-    /// Maximum length of identifier accepted in this API.
-    enum maxIdentifierLength = 255;
-
 
     /// Get a context variable. The look-up will chain to above contexts like sort of namespaces 
     /// or a dynamic cast. Topmost context gets the lookup.
@@ -146,15 +155,14 @@ nothrow @nogc @safe:
         {
             // modify in place
             if (varSize != T.sizeof)
-                assert(false); // bad size, programming error
+                assert(false); // bad size, programming error. Type safety error checked at runtime.
+
             foreach(n; 0..T.sizeof)
                 existing[n] = pvalue[n];
         }
         else
         {
-            import core.stdc.stdio;
-
-            stack.pushValue!size_t(name.length); // TODO: in ABI, put size_t here
+            stack.pushValue!size_t(name.length);
             stack.pushValue!size_t(T.sizeof);
             stack.pushBytes(cast(ubyte*) name.ptr, name.length);
             stack.pushBytes(cast(ubyte*) pvalue, T.sizeof);
@@ -162,7 +170,27 @@ nothrow @nogc @safe:
             // Increment number of entries
             stack.incrementVariableCount();
         }
-    }    
+    }
+
+    /// Allocates a temporary buffer on the context stack. 
+    /// The lifetime of this buffer extends until the `popContext` is called.
+    /// Note: This buffer is not scanned, and shouldn't contain GC pointers.
+    void* alloca(size_t size)
+    {
+        if (stack.offsetOfTopContext != offset)
+        {
+            // Can't alloca except from top-context.
+            assert(false);
+        }
+        stack.pushValue!size_t(0);
+        stack.pushValue!size_t(size);
+        void* p = stack.pushBytesUninitialized(size);
+
+        // Increment number of entries
+        stack.incrementVariableCount();
+
+        return p;
+    }
 
 private:
 
@@ -395,19 +423,33 @@ private:
         return cast(ubyte[])buffer[offset..offset+len];
     }
 
+    void ensureCapacity(size_t sizeBytes) @trusted
+    {
+        if (capacity < sizeBytes)
+        {
+            size_t newCapacity = calculateGrowth(sizeBytes, capacity);
+            buffer = safe_realloc(buffer, newCapacity);
+            capacity = newCapacity;
+        }
+    }
+
+    /// Append byte storage at the end (uninitialized), extend memory if needed. Return pointer to allocated area.
+    void* pushBytesUninitialized(size_t sz) @trusted
+    {
+        ensureCapacity(size + sz);
+        void* p = &buffer[size];
+        size += sz;
+        return p;        
+    }
+
     /// Push bytes on stack, extend memory if needed.
     void pushBytes(scope const(ubyte)* bytes, size_t sz) @trusted
     {
-        if (capacity < size + sz)
-        {
-            buffer = safe_realloc(buffer, size + sz); // PERF: optimize upsize realloc
-            capacity = size + sz;
-        }
+        ensureCapacity(size + sz);      
 
         ubyte* p = cast(ubyte*) &buffer[size];
         foreach(n; 0..sz)
             p[n] = bytes[n];
-
         size += sz;
     }
 
@@ -443,7 +485,6 @@ private:
         // TODO: realloc in case we can win a sizeable amount of memory.
     }
 }
- 
 
 void* safe_realloc(void* ptr, size_t newSize) @trusted
 {
@@ -453,6 +494,14 @@ void* safe_realloc(void* ptr, size_t newSize) @trusted
         return null;
     }
     return realloc(ptr, newSize);
+}
+
+size_t calculateGrowth(size_t newSize, size_t oldCapacity) pure
+{
+    size_t geometric = oldCapacity + oldCapacity / 2;
+    if (geometric < newSize) 
+        return newSize; // geometric growth would be insufficient
+    return geometric;
 }
 
 //debug = debugContext;
@@ -519,14 +568,14 @@ debug(debugContext)
     Let SZ = size_t.sizeof;
 
 
-    0000   offset of parent context in the stack (root context is at location SZ, null context at location 0)
-    SZ     number of entries in the context "numEntries"
-    SZ*2   bloom filter of identifier hashes (unused yet)
+    0000               parent       Offset of parent context in the stack (root context is at location SZ, null context at location 0)
+    SZ                 numEntries   Number of entries in the context "numEntries"
+    SZ*2               bloom        bloom filter of identifier hashes (unused yet), this allows to skip one context while searching for a key.
     
     foreach(entry; 0..numEntries x times):
-        0000           size of identifier in bytes
-        SZ             size of value in bytes 
-        2*SZ           identifier (char[])
-        2*SZ+identlen  variable value
-
+        0000           identLen     Size of identifier in bytes.
+                                    0 is a special value for `alloca()` allocation. Such context variables have no names.
+          SZ           valueLen     Size of value in bytes.
+        2*SZ           name         Identifier string (char[]).
+        2*SZ+identlen  value        Variable value.
 */
