@@ -55,11 +55,9 @@ Example:
 */
 // TODO: error system that propagates on popContext? so as to replace exceptions.
 // TODO: what to do for lifetime stuff. A function to be called on release? See also: COM.
-// TODO: what about a context destructor? like an at_exit stack
+// TODO: what about a context destructor? like an at_exit stack. What about a destructor by variable?
 // TODO: what to do for GC roots? context might be scanned somehow.
 // TODO: should contexts be copyable? Why does Odin do this?
-// TODO: restrict identifiers to valid D identifiers.
-// TODO: simultaneous hashOfIdentifier and identifier validation
 module core.context;
 
 import core.stdc.stdlib : malloc, free, realloc;
@@ -145,7 +143,8 @@ public /* <Public Context API> */
             // First check if it already exists.
             ubyte* existing;
             size_t varSize;
-            bool found = getValueLocationAndSize(offset, name, existing, varSize);
+            hashcode_t hashCode;
+            bool found = getValueLocationAndSize(offset, name, existing, varSize, hashCode);
             if (found)
             {
                 // modify in place
@@ -157,6 +156,7 @@ public /* <Public Context API> */
             }
             else
             {
+                stack.pushValue!hashcode_t(hashCode);
                 stack.pushValue!size_t(name.length);
                 stack.pushValue!size_t(T.sizeof);
                 stack.pushBytes(cast(ubyte*) name.ptr, name.length);
@@ -164,12 +164,14 @@ public /* <Public Context API> */
 
                 // Increment number of entries
                 stack.incrementVariableCount();
+                stack.updateContextHashCode(hashCode);
             }
         }
 
         /// Allocates a temporary buffer on the context stack. 
         /// The lifetime of this buffer extends until the `popContext` is called.
         /// Note: This buffer is not scanned, and shouldn't contain GC pointers.
+        /// You can't search stack allocation created that way by name.
         void* alloca(size_t size)
         {
             if (stack.offsetOfTopContext != offset)
@@ -177,12 +179,15 @@ public /* <Public Context API> */
                 // Can't alloca except from top-context.
                 assert(false);
             }
+            stack.pushValue!hashcode_t(0);   // zero hashcode
             stack.pushValue!size_t(0);
             stack.pushValue!size_t(size);
             void* p = stack.pushBytesUninitialized(size);
 
             // Increment number of entries
             stack.incrementVariableCount();
+
+            // Note: no need to update bloom, since hash of empty string is zero.
 
             return p;
         }
@@ -214,10 +219,11 @@ public /* <Public Context API> */
         bool getValueLocationAndSize(size_t contextOffset, 
                                      scope const(char)[] name,
                                      ref ubyte* location, 
-                                     out size_t varSize) @trusted
+                                     out size_t varSize,
+                                     out hashcode_t outHashCode) @trusted
         {
             // Compute hash of identifier
-            uint hashCode;
+            hashcode_t hashCode;
             bool validName = validateContextIdentifier(name, hashCode);
             if (!validName) 
             {
@@ -227,27 +233,43 @@ public /* <Public Context API> */
                 assert(false);
             }
 
+            outHashCode = hashCode;
+
             size_t entries;
             stack.readValue(contextOffset + size_t.sizeof, entries);
 
-            // PERF: skip the whole context traversal based upon a bloom hash of identifiers there.
+            hashcode_t hashUnion;
+            stack.readValue(contextOffset + size_t.sizeof * 2, hashUnion);
+            if ( (hashUnion & hashCode) != hashCode)
+            {
+                // If the name was in this context, then it would be in the hash union. (aka a bloom filter).
+                // Report not found.
+                // Stack allocation (empty string and 0 hashcode) cannot be searched for, so it's not an issue.
+                return false;
+            }
 
-            size_t varHeader = contextOffset + 3 * size_t.sizeof; // skip context header
+            size_t varHeader = contextOffset + CONTEXT_HEADER_SIZE; // skip context header
+
             for (size_t n = 0; n < entries; ++n)
             {
+                hashcode_t hashHere;
                 size_t identSize, valueSize;
-                stack.readValue(varHeader, identSize);
-                stack.readValue(varHeader+size_t.sizeof, valueSize);
+                stack.readValue(varHeader, hashHere);
+                stack.readValue(varHeader + HASHCODE_BYTES, identSize);
+                stack.readValue(varHeader + HASHCODE_BYTES + size_t.sizeof, valueSize);
 
-                const(char)[] storedIndent = cast(const(char)[]) stack.bufferSlice(varHeader + size_t.sizeof * 2, identSize);
-                if (storedIndent == name)
+                if (hashHere == hashCode) // Same hashcode? Compare the identifier then.
                 {
-                    varSize = valueSize;
-                    location = cast(ubyte*)(&stack.buffer[varHeader + size_t.sizeof * 2 + identSize]);
-                    return true;
+                    const(char)[] storedIndent = cast(const(char)[]) stack.bufferSlice(varHeader + HASHCODE_BYTES + size_t.sizeof * 2, identSize);
+                    if (storedIndent == name)
+                    {
+                        varSize = valueSize;
+                        location = cast(ubyte*)(&stack.buffer[varHeader + HASHCODE_BYTES + size_t.sizeof * 2 + identSize]);
+                        return true;
+                    }
                 }
 
-                varHeader = varHeader + size_t.sizeof * 2 + identSize + valueSize;
+                varHeader = varHeader + HASHCODE_BYTES + size_t.sizeof * 2 + identSize + valueSize;
             }
             return false;
         }
@@ -259,7 +281,8 @@ public /* <Public Context API> */
         {
             size_t varSize;
             ubyte* location;
-            if (getValueLocationAndSize(contextOffset, name, location, varSize))
+            hashcode_t hashCode;
+            if (getValueLocationAndSize(contextOffset, name, location, varSize, hashCode))
             {
                 if (size == varSize)
                 {
@@ -344,6 +367,12 @@ unittest /* <Usage Example> */
 
 private /* <Implementation of context stack> */
 {
+    alias hashcode_t = uint;
+
+    /// Size in bytes of an identifier hashCode.
+    enum size_t HASHCODE_BYTES = hashcode_t.sizeof;
+
+    enum size_t CONTEXT_HEADER_SIZE = HASHCODE_BYTES + 2 * size_t.sizeof; 
 
     /// A TLS stack, one for each thread.
     ContextStack g_contextStack;
@@ -377,12 +406,12 @@ private /* <Implementation of context stack> */
 
             // Create number of entries and bloom field.
             size_t entries = 0;
-            size_t bloom = 0;
+            hashcode_t hashUnion = 0; // nothing yet
 
             // Write frame header.
             pushValue(parentContextLocation);
             pushValue(entries);
-            pushValue(bloom);
+            pushValue(hashUnion);
         
             contextCount += 1;
 
@@ -432,12 +461,12 @@ private /* <Implementation of context stack> */
 
             size_t offset = 0; // null context = no parent
             size_t entries = 0;
-            size_t bloom = 0;
+            hashcode_t hashUnion = 0;
             pushValue(offset); // 0 location is null context, should not be accessed.
 
             pushValue(offset);
             pushValue(entries);
-            pushValue(bloom);
+            pushValue(hashUnion);
             offsetOfTopContext = offsetOfRootContext;
             contextCount = 1;
 
@@ -445,12 +474,20 @@ private /* <Implementation of context stack> */
             populateContextWithDefaultUserPointer(context);
             populateContextWithDefaultAllocator(context);
             populateContextWithDefaultLogger(context);
+
+            dumpStack(context.stack);
         }
 
         void incrementVariableCount() @trusted
         {
             size_t* numValues = cast(size_t*)(&buffer[offsetOfTopContext + size_t.sizeof]);
             *numValues = *numValues + 1;
+        }
+
+        void updateContextHashCode(hashcode_t hashCode) @trusted
+        {
+            hashcode_t* hashUnion = cast(hashcode_t*)(&buffer[offsetOfTopContext + size_t.sizeof*2]);
+            *hashUnion |= hashCode;
         }
 
         const(ubyte[]) bufferSlice(size_t offset, size_t len) return @trusted
@@ -505,10 +542,8 @@ private /* <Implementation of context stack> */
         //ditto
         void readValue(T)(size_t location, out T value) @trusted
         {
-            const(ubyte)* p = cast(const(ubyte)*) &buffer[location];
-            ubyte* bytes = cast(ubyte*) &value;
-            foreach(n; 0..T.sizeof)
-                bytes[n] = p[n];
+            const(T)* p = cast(const(T)*) &buffer[location];
+            value = *p;
         }
 
         // Pop bytes from stack.
@@ -517,7 +552,7 @@ private /* <Implementation of context stack> */
             readBytes(size - sz, bytes, sz);
             size -= sz;
 
-            // TODO: realloc in case we can win a sizeable amount of memory.
+            // Note: this never resizes down, like std::vector. TODO add a shrink_to_fit function?
         }
     }
 
@@ -535,7 +570,7 @@ private /* <Implementation of context stack> */
     // letters, _, digits, or universal alphas. Universal alphas are as defined in ISO/IEC 
     // 9899:1999(E) Appendix D of the C99 Standard. Identifiers can be arbitrarily long, and are 
     // case sensitive.
-    static bool validateContextIdentifier(const(char)[] identifier, ref uint hashCode) pure nothrow @nogc @safe 
+    static bool validateContextIdentifier(const(char)[] identifier, ref hashcode_t hashCode) pure nothrow @nogc @safe 
     {
         if (identifier.length == 0)
         {
@@ -553,7 +588,7 @@ private /* <Implementation of context stack> */
         }
 
         char ch = identifier[0];
-        int hash = ch;
+        hashcode_t hash = ch;
 
         if (!isAlpha(ch)) // first character must be an alpha
             return false;
@@ -570,7 +605,7 @@ private /* <Implementation of context stack> */
     }
     unittest
     {
-        uint hash = 2;
+        hashcode_t hash = 2;
         assert(validateContextIdentifier("", hash));
         assert(hash == 0); // hash of empty string is zero
 
@@ -578,7 +613,7 @@ private /* <Implementation of context stack> */
         assert(!validateContextIdentifier("é", hash)); // invalid identifier       
     }
 
-    //debug = debugContext;
+    debug = debugContext;
 
 
     debug(debugContext)
@@ -594,28 +629,31 @@ private /* <Implementation of context stack> */
                 printf("*** Context at %zu\n", ofs);
                 size_t parentContextOfs;
                 size_t entries;
-                size_t bloom;
+                hashcode_t hashUnion;
                 stack.readValue(ofs, parentContextOfs);
                 stack.readValue(ofs + size_t.sizeof, entries);
-                stack.readValue(ofs + size_t.sizeof*2, bloom);
-                assert(bloom == 0);
+                stack.readValue(ofs + size_t.sizeof*2, hashUnion);
 
-                printf(" - parent  = %zu\n", parentContextOfs);
-                printf(" - entries = %zu\n", entries);
-                printf(" - bloom   = %zu\n", bloom);
+                printf(" - parent       = %zu\n", parentContextOfs);
+                printf(" - entries      = %zu\n", entries);
+                printf(" - hash union   = %x\n", hashUnion);
 
-                ofs += size_t.sizeof * 3;
+                ofs += CONTEXT_HEADER_SIZE;
+
                 for (size_t n = 0; n < entries; ++n)
                 {
+                    hashcode_t hashCode;
                     size_t identLen;
                     size_t varLen;
-                    stack.readValue(ofs,                 identLen);
-                    stack.readValue(ofs + size_t.sizeof, varLen);
+                    stack.readValue(ofs,                                   hashCode);
+                    stack.readValue(ofs + HASHCODE_BYTES ,                 identLen);
+                    stack.readValue(ofs + HASHCODE_BYTES  + size_t.sizeof, varLen);
 
                     printf(" - context variable %zu:\n", n);
 
-                    const(ubyte)[] ident = stack.bufferSlice(ofs + size_t.sizeof * 2, identLen);
-                    const(ubyte)[] data = stack.bufferSlice(ofs + size_t.sizeof * 2 + identLen, varLen);
+                    const(ubyte)[] ident = stack.bufferSlice(ofs + HASHCODE_BYTES + size_t.sizeof * 2, identLen);
+                    const(ubyte)[] data = stack.bufferSlice(ofs + HASHCODE_BYTES + size_t.sizeof * 2 + identLen, varLen);
+                    printf("    * hash       = %x\n", hashCode);
                     printf(`    * identifier = "%.*s"` ~ " (%zu bytes)\n", cast(int)(ident.length), ident.ptr, ident.length);
                     printf(`    * content    = `);
                     for (size_t b = 0; b < data.length; ++b)
@@ -623,7 +661,7 @@ private /* <Implementation of context stack> */
                         printf("%02X ", data[b]);
                     }
                     printf(" (%zu bytes)\n", varLen);
-                    ofs += size_t.sizeof * 2 + identLen + varLen;
+                    ofs += HASHCODE_BYTES + size_t.sizeof * 2 + identLen + varLen;
                 }
                 if (ofs == stack.size)
                     break;
@@ -635,21 +673,27 @@ private /* <Implementation of context stack> */
     }
 
     /**
-        APPENDIX: ABI of context stack implemented above.
+      APPENDIX: ABI of context stack implemented above.
 
-        Let SZ = size_t.sizeof;
+      Let SZ = size_t.sizeof;
+      Let HZ = hashcode_t.sizeof;
 
 
-        0000               parent       Offset of parent context in the stack (root context is at location SZ, null context at location 0)
-        SZ                 numEntries   Number of entries in the context "numEntries"
-        SZ*2               bloom        bloom filter of identifier hashes (unused yet), this allows to skip one context while searching for a key.
+      0000            parent         Offset of parent context in the stack (root context is at 
+                                     location SZ, null context at location 0)
+      SZ              numEntries     Number of entries in the context "numEntries"
+      SZ*2            hashUnion      Bloom filter of identifier hashes (union of hashes), this allows
+                                     to skip whole context while searching for a key.  (HZ bytes)
 
-        foreach(entry; 0..numEntries x times):
-        0000           identLen     Size of identifier in bytes.
-        0 is a special value for `alloca()` allocation. Such context variables have no names.
-        SZ           valueLen     Size of value in bytes.
-        2*SZ           name         Identifier string (char[]).
-        2*SZ+identlen  value        Variable value.
+      foreach(entry; 0..numEntries x times):
+        0000             hashCode     Hash code of following identifier (HZ bytes).
+          HZ             identLen     Size of identifier in bytes.
+                                      0 is a special value for `alloca()` allocation. Such context 
+                                      variables have no names.
+        HZ+SZ            valueLen     Size of value in bytes.
+        HZ+2*SZ          name         Identifier string (char[]).
+        HZ+2*SZ+identlen value        Variable value.
+
     */
 }  /* </Implementation of context stack> */
 
@@ -757,8 +801,7 @@ public
         /// A single function pointer for this allocator API.
         realloc_fun_t realloc; // not owned, this function pointer must outlive the allocator.
 
-        // TODO: Could have a few more operations there maybe for convenience, such as free, malloc, 
-        // make, etc.
+        // MAYDO: Could have a few more operations there maybe for convenience.
 
         /// Allocate bytes, helper function.
         /// Returns: an allocation that MUST be freed with either `ContextAllocator.free` or 
