@@ -15,9 +15,8 @@ Note: this module uses TLS.
 Examples:
   - allocators
   - loggers
-  - tuning variables in audio plugins
   - the UI "context" in UIs
-  - the audio "context" in DSP
+  ...
 
 Note: internal stack is handled with malloc/realloc/free from the C stdlib. Performance of internal
       stack relies on a malloc implementation that is itself lockfree, else the realloc could 
@@ -75,7 +74,7 @@ public /* <Public Context API> */
     /// Return current context object.
     /// An `ImplicitContext` is safely copyable, but only the top-most context per-thread can be 
     /// modified (like in _the_ stack).
-    /// There is no reason to store it.
+    /// There is no reason to store it though?
     ImplicitContext context()
     {
         return g_contextStack.currentContext();
@@ -475,7 +474,7 @@ private /* <Implementation of context stack> */
             populateContextWithDefaultAllocator(context);
             populateContextWithDefaultLogger(context);
 
-            dumpStack(context.stack);
+            //dumpStack(context.stack);
         }
 
         void incrementVariableCount() @trusted
@@ -613,7 +612,7 @@ private /* <Implementation of context stack> */
         assert(!validateContextIdentifier("é", hash)); // invalid identifier       
     }
 
-    debug = debugContext;
+    //debug = debugContext;
 
 
     debug(debugContext)
@@ -702,10 +701,13 @@ private /* <Implementation of context stack> */
 // This file could have ended here, but here is some example of API usage, to give some ideas and 
 // also implement the basics.
 //
+// Basically one can add any "contextual" API, you just need to find a unique identifier. 
+// (the prefixed __identifiers are reserved for this library).
+//
 // The idea of having allocators and such in this library is so that a package that depends on a 
 // package that itseld depends on "implicit-context" will not be forced to use "implicit-context" 
-// (unless there is some customization to do).
-
+// itself (unless of course if there is a need).
+// Basically in nominal usage both dependent AND dependee must depend on implicit-context library.
 
 
 //
