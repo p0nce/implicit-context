@@ -58,11 +58,14 @@ Example:
 // TODO: what about a context destructor? like an at_exit stack
 // TODO: what to do for GC roots? context might be scanned somehow.
 // TODO: should contexts be copyable? Why does Odin do this?
+// TODO: restrict identifiers to valid D identifiers.
+// TODO: simultaneous hashOfIdentifier and identifier validation
 module core.context;
 
 import core.stdc.stdlib : malloc, free, realloc;
 import core.stdc.stdio: printf, vsnprintf;
 import core.stdc.stdarg: va_start, va_end, va_list;
+
 
 nothrow @nogc @safe:
 
@@ -209,10 +212,21 @@ public /* <Public Context API> */
 
         // Find the location of a value and its size in this context.
         bool getValueLocationAndSize(size_t contextOffset, 
-                                     const(char)[] name,
+                                     scope const(char)[] name,
                                      ref ubyte* location, 
                                      out size_t varSize) @trusted
         {
+            // Compute hash of identifier
+            uint hashCode;
+            bool validName = validateContextIdentifier(name, hashCode);
+            if (!validName) 
+            {
+                // If you fail here, it is because the identifier searched for is not a valid 
+                // Context identifier. This is a programming error to use such a name.
+                // Only strings that would be valid D identifier can go into an implicit context as variable name.
+                assert(false);
+            }
+
             size_t entries;
             stack.readValue(contextOffset + size_t.sizeof, entries);
 
@@ -515,6 +529,55 @@ private /* <Implementation of context stack> */
         return geometric;
     }
 
+    // Validate identifier and compute hash at the same time.
+    // It's like D identifiers:
+    // "Identifiers start with a letter, _, or universal alpha, and are followed by any number of 
+    // letters, _, digits, or universal alphas. Universal alphas are as defined in ISO/IEC 
+    // 9899:1999(E) Appendix D of the C99 Standard. Identifiers can be arbitrarily long, and are 
+    // case sensitive.
+    static bool validateContextIdentifier(const(char)[] identifier, ref uint hashCode) pure nothrow @nogc @safe 
+    {
+        if (identifier.length == 0)
+        {
+            hashCode = 0;
+            return true; // empty string is a valid identifier (alloca allocations on the context stack).
+        }
+
+        static bool isDigit(char ch)
+        {
+            return ch >= '0' && ch <= '9';
+        }
+        static bool isAlpha(char ch)
+        {
+            return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch == '_');
+        }
+
+        char ch = identifier[0];
+        int hash = ch;
+
+        if (!isAlpha(ch)) // first character must be an alpha
+            return false;
+        
+        for(size_t n = 1; n < identifier.length; ++n)
+        {
+            ch = identifier[n];
+            if (!isAlpha(ch) && !isDigit(ch))
+                return false;
+            hash = hash * 31 + ch;
+        }
+        hashCode = hash;
+        return true;
+    }
+    unittest
+    {
+        uint hash = 2;
+        assert(validateContextIdentifier("", hash));
+        assert(hash == 0); // hash of empty string is zero
+
+        assert(validateContextIdentifier("__allocator", hash));
+        assert(!validateContextIdentifier("é", hash)); // invalid identifier       
+    }
+
     //debug = debugContext;
 
 
@@ -631,7 +694,6 @@ private
     {
         ctx.set!(void*)(CONTEXT_USER_POINTER_IDENTIFIER, null); // default is simply a null pointer
     }
-
 }
 @trusted unittest
 {
