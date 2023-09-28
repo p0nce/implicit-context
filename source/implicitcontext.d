@@ -57,7 +57,7 @@ Example:
 // TODO: what about a context destructor? like an at_exit stack. What about a destructor by variable?
 // TODO: what to do for GC roots? context might be scanned somehow.
 // TODO: should contexts be copyable? Why does Odin do this? probably, to give one to a new thread. In that case, need to copy whole stack.
-module core.context;
+module implicitcontext;
 
 import core.stdc.stdlib : malloc, free, realloc;
 import core.stdc.stdio: printf, vsnprintf;
