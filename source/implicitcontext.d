@@ -1,5 +1,10 @@
 /**
 
+Contextual parameter system for D.
+
+Copyright: Copyright Guillaume Piolat 2021.
+License:   $(LINK2 http://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
+
 This is an implicit context system like in Odin, itself probably inspired by Scala "implicit 
 parameters". In other words, a system to have scoped globals.
 

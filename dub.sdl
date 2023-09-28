@@ -1,3 +1,4 @@
 name "implicit-context"
+licence "BSL-1.0"
 description "Scala-like implicit context without ABI changes."
 #buildOptions "betterC"
