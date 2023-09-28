@@ -1,7 +1,7 @@
 /**
 
-This is an implicit context system like in Odin, itself probably inspired by Scala "implicit parameters".
-In other words, a system to have scoped globals.
+This is an implicit context system like in Odin, itself probably inspired by Scala "implicit 
+parameters". In other words, a system to have scoped globals.
 
 "In each scope, there is an implicit value named context. This CONTEXT VARIABLE is local to each 
 scope and is implicitly passed by pointer to any procedure call in that scope (if the procedure 
@@ -10,7 +10,7 @@ has the Odin calling convention)."
 Without language support, we don't have the ABI and the scope-specific context, however with TLS 
 and manual scopes we can emulate that to pass parameters in an implicit way (scoped globals, in a way).
 
-Note: this module uses TLS.
+Note: this module uses TLS, and C runtime.
 
 Examples:
   - allocators
@@ -43,20 +43,20 @@ Example:
         context.set!int("userStuff", 3);
         assert(context.get!int("userStuff") == 3);            // stack-like organization of contexts
 
-        void* buffer = context.alloca(128);                   // Support stack allocation.
-
-        context.pop;                                         // buffer reclaimed here
+        context.pop;
 
         assert(context.get!int("userStuff") == 4);            // stack-like organization of contexts, with hierarchic namespacing
     }
     subProc();
 
 */
-// TODO: error system that propagates on popContext? so as to replace exceptions.
+// TODO: error system that propagates on popContext? so as to report error codes and exceptions. An "errno" extension?
 // TODO: what to do for lifetime stuff. A function to be called on release? See also: COM.
-// TODO: what about a context destructor? like an at_exit stack. What about a destructor by variable?
+// TODO: what about a context destructor? like an at_exit stack. What about a destructor per variable?
+// TOOD: what about arrays? What about pointer to variable.
 // TODO: what to do for GC roots? context might be scanned somehow.
 // TODO: should contexts be copyable? Why does Odin do this? probably, to give one to a new thread. In that case, need to copy whole stack.
+// TODO: use a stackallocator to be able to rely on things staying in place, no realloc penalty + alloca becomes possible.
 module implicitcontext;
 
 import core.stdc.stdlib : malloc, free, realloc;
@@ -167,6 +167,12 @@ public /* <Public Context API> */
             }
         }
 
+
+        /+
+
+        Doesn't work if the stack is reallocated. This will invalidate such pointers.
+        We need another internal allocator to support such, see stackallocator.d in Dplug
+
         /// Allocates a temporary buffer on the context stack. 
         /// The lifetime of this buffer extends until the `popContext` is called.
         /// Note: This buffer is not scanned, and shouldn't contain GC pointers.
@@ -191,6 +197,7 @@ public /* <Public Context API> */
             return p;
         }
 
+        +/
 
         /// Helper for `pushContext()`.
         /// This isn't tied to this particular context, so `static` it is.
@@ -333,11 +340,13 @@ unittest /* <Usage Example> */
     context.set!int("user_index", 456);
 
     // Allocate on TLS stack.
+    /+
     () @trusted
     {
         ubyte* storage = cast(ubyte*) context.alloca(128);
         storage[0..128] = 2;
     }();
+    +/
 
 
     assert(context.get!int("user_index") == 456);
