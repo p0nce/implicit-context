@@ -1,6 +1,6 @@
 /**
 
-This is an implicit context system like in Odin, itself probably inspired by Scala implicits.
+This is an implicit context system like in Odin, itself probably inspired by Scala "implicit parameters".
 In other words, a system to have scoped globals.
 
 "In each scope, there is an implicit value named context. This CONTEXT VARIABLE is local to each 
@@ -56,7 +56,7 @@ Example:
 // TODO: what to do for lifetime stuff. A function to be called on release? See also: COM.
 // TODO: what about a context destructor? like an at_exit stack. What about a destructor by variable?
 // TODO: what to do for GC roots? context might be scanned somehow.
-// TODO: should contexts be copyable? Why does Odin do this?
+// TODO: should contexts be copyable? Why does Odin do this? probably, to give one to a new thread. In that case, need to copy whole stack.
 module core.context;
 
 import core.stdc.stdlib : malloc, free, realloc;
@@ -860,7 +860,7 @@ public
     nothrow @nogc @system
     {
         /// This functions prints a format-less, ZERO-TERMINATED string. Hence, the @system interface.
-        /// Also, cannot fail.
+        /// Also, cannot fail. \n must flush.
         alias print_fun_t = void function(const(char)* message);
     }
 
