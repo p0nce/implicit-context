@@ -60,7 +60,7 @@ Use `context.query` for an optional variable:
 
 ```d
 int myInt;
-bool found = context.query!int("myInt");
+bool found = context.query!int("myInt", myInt);
 ```
 
 _Note: wrong type size will crash. Type mismatch with right size will silently succeed, currently._
